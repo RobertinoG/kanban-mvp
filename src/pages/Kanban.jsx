@@ -1,24 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 
-const STATUSES = [
+// Solo estados de TRABAJO (cerrados van al Historial)
+const ACTIVE_STATUSES = [
   { key: "new", label: "Nuevo" },
   { key: "confirmed", label: "Confirmado" },
   { key: "in_preparation", label: "En preparación" },
   { key: "ready", label: "Listo" },
   { key: "dispatched", label: "Despachado" },
-  { key: "completed", label: "Completado" },
-  { key: "cancelled", label: "Cancelado" },
 ];
 
-// Transiciones permitidas por rol (UI)
 const ROLE_TRANSITIONS = {
   operario: {
     new: ["confirmed"],
     ready: ["dispatched"],
-    dispatched: ["completed"],
-    // opcional: permitir cancelar desde operario
-    // confirmed: ["cancelled"],
+    dispatched: ["completed"], // se moverá al historial cuando cambie
   },
   cocinero: {
     confirmed: ["in_preparation"],
@@ -30,8 +26,6 @@ const ROLE_TRANSITIONS = {
     in_preparation: ["ready", "cancelled"],
     ready: ["dispatched", "cancelled"],
     dispatched: ["completed", "cancelled"],
-    completed: [],
-    cancelled: [],
   },
 };
 
@@ -44,45 +38,57 @@ export default function Kanban({ profile }) {
   const role = profile?.role ?? null;
 
   const [ordersByStatus, setOrdersByStatus] = useState({});
-  const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // mobile tabs: status seleccionado
+  // mobile tabs
   const [activeStatus, setActiveStatus] = useState("new");
-  const isMobile = useMemo(() => window.matchMedia && window.matchMedia("(max-width: 900px)").matches, []);
+  const isMobile = useMemo(
+    () => window.matchMedia && window.matchMedia("(max-width: 900px)").matches,
+    []
+  );
 
   const load = async () => {
-    setLoading(true);
     setMsg("");
 
-    // 1 sola query: trae pedidos y los agrupamos por status
+    // Trae todos los pedidos ACTIVOS en una sola query
+    const activeKeys = ACTIVE_STATUSES.map((s) => s.key);
+
     const { data, error } = await supabase
       .from("orders")
       .select("id,order_number,status,customer_name,customer_phone,channel,created_at,updated_at,is_priority")
+      .in("status", activeKeys)
       .order("created_at", { ascending: true });
 
     if (error) {
       setMsg(error.message);
-      setLoading(false);
       return;
     }
 
     const next = {};
-    for (const s of STATUSES) next[s.key] = [];
+    for (const s of ACTIVE_STATUSES) next[s.key] = [];
     for (const o of data ?? []) {
       if (!next[o.status]) next[o.status] = [];
       next[o.status].push(o);
     }
 
     setOrdersByStatus(next);
-    setLoading(false);
   };
 
-  // auto-refresh
+  // Auto-refresh silencioso
   useEffect(() => {
     load();
-    const t = setInterval(load, 3000); // cada 3s
+    const t = setInterval(load, 3000); // 3s
     return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Atajo opcional: tecla R para refrescar manual
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key?.toLowerCase() === "r") load();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -117,7 +123,6 @@ export default function Kanban({ profile }) {
                 <div style={{ opacity: 0.7 }}>{o.channel}</div>
               </div>
 
-              {/* Botones SOLO permitidos por rol */}
               <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {!role && <span style={{ opacity: 0.7, fontSize: 12 }}>Cargando rol...</span>}
 
@@ -127,7 +132,11 @@ export default function Kanban({ profile }) {
 
                 {role &&
                   targets.map((next) => {
-                    const label = STATUSES.find((x) => x.key === next)?.label ?? next;
+                    // Traducción de label (incluye completed/cancelled aunque no estén en ACTIVE_STATUSES)
+                    const label =
+                      ACTIVE_STATUSES.find((x) => x.key === next)?.label ??
+                      (next === "completed" ? "Completado" : next === "cancelled" ? "Cancelado" : next);
+
                     return (
                       <button
                         key={next}
@@ -146,26 +155,19 @@ export default function Kanban({ profile }) {
     </div>
   );
 
-  // layout
   const gridStyle = isMobile
     ? { display: "grid", gridTemplateColumns: "1fr", gap: 10, marginTop: 12 }
-    : { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 10, marginTop: 12 };
+    : { display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10, marginTop: 12 };
 
   return (
     <div style={{ padding: 14, fontFamily: "sans-serif" }}>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <h2 style={{ margin: 0 }}>Kanban</h2>
-        <button onClick={load} disabled={loading}>
-          {loading ? "Cargando..." : "Refrescar"}
-        </button>
-        {msg && <span style={{ color: "crimson" }}>{msg}</span>}
-        <span style={{ opacity: 0.7 }}>Auto-refresh: 3s</span>
-      </div>
+      <h2 style={{ margin: 0 }}>Kanban</h2>
+      {msg && <div style={{ color: "crimson", marginTop: 8 }}>{msg}</div>}
 
       {/* Mobile tabs */}
       {isMobile && (
         <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {STATUSES.map((s) => (
+          {ACTIVE_STATUSES.map((s) => (
             <button
               key={s.key}
               onClick={() => setActiveStatus(s.key)}
@@ -184,8 +186,8 @@ export default function Kanban({ profile }) {
 
       <div style={gridStyle}>
         {isMobile
-          ? renderColumn(STATUSES.find((x) => x.key === activeStatus) ?? STATUSES[0])
-          : STATUSES.map(renderColumn)}
+          ? renderColumn(ACTIVE_STATUSES.find((x) => x.key === activeStatus) ?? ACTIVE_STATUSES[0])
+          : ACTIVE_STATUSES.map(renderColumn)}
       </div>
     </div>
   );
