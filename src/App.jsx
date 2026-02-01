@@ -4,7 +4,7 @@ import { supabase } from "./lib/supabase";
 import Login from "./pages/Login";
 import Kanban from "./pages/Kanban";
 import History from "./pages/History";
-import Costs from "./pages/Costs";
+import UploadCosts from "./pages/Costs";
 
 export default function App() {
   const [session, setSession] = useState(null);
