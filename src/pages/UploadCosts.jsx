@@ -2,8 +2,6 @@ import { useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 
 function parseCSV(text) {
-  // Parser simple: soporta comillas dobles y comas.
-  // Para MVP, suficiente. Si necesitás algo ultra robusto, luego metemos PapaParse (más seguro que xlsx).
   const rows = [];
   let i = 0;
   let field = "";
@@ -15,7 +13,6 @@ function parseCSV(text) {
     field = "";
   };
   const pushRow = () => {
-    // evita filas vacías
     if (row.some((c) => String(c).trim() !== "")) rows.push(row);
     row = [];
   };
@@ -27,7 +24,7 @@ function parseCSV(text) {
       if (c === '"') {
         const next = text[i + 1];
         if (next === '"') {
-          field += '"'; // escape ""
+          field += '"';
           i += 2;
           continue;
         } else {
@@ -66,7 +63,6 @@ function parseCSV(text) {
     }
   }
 
-  // flush
   pushField();
   pushRow();
 
@@ -95,7 +91,7 @@ export default function UploadCosts({ locationId }) {
     if (!file) return;
 
     if (!file.name.toLowerCase().endsWith(".csv")) {
-      setMsg("Por seguridad, solo aceptamos CSV. Exportalo desde Excel como .csv y probá de nuevo.");
+      setMsg("Por seguridad, solo aceptamos CSV. Exportalo desde Excel como .csv.");
       return;
     }
 
@@ -155,7 +151,6 @@ export default function UploadCosts({ locationId }) {
         is_active: true,
       }));
 
-      // Insert por chunks
       const chunkSize = 300;
       for (let i = 0; i < payload.length; i += chunkSize) {
         const chunk = payload.slice(i, i + chunkSize);
@@ -172,50 +167,52 @@ export default function UploadCosts({ locationId }) {
   };
 
   return (
-    <div style={{ padding: 14, fontFamily: "sans-serif", maxWidth: 980, margin: "0 auto" }}>
-      <h2>Cargar costos (CSV)</h2>
+    <div className="card" style={{ padding: 14 }}>
+      <div className="sectionTitle">Cargar costos (CSV)</div>
+      <div className="hint">
+        Columnas mínimas: <b>product_name</b>, <b>unit_cost</b>. Opcional: currency, active_from.
+      </div>
 
-      <input type="file" accept=".csv" onChange={(e) => onFile(e.target.files?.[0])} />
-
-      <div style={{ marginTop: 10 }}>
-        <button onClick={upload} disabled={loading || validRows.length === 0}>
+      <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <input type="file" accept=".csv" onChange={(e) => onFile(e.target.files?.[0])} />
+        <button className="btn" onClick={upload} disabled={loading || validRows.length === 0}>
           {loading ? "Cargando..." : "Subir a Supabase"}
         </button>
         {msg && (
-          <span style={{ marginLeft: 10, color: msg.startsWith("OK") ? "green" : "crimson" }}>{msg}</span>
+          <span style={{ fontWeight: 800, color: msg.startsWith("OK") ? "#166534" : "#b91c1c" }}>
+            {msg}
+          </span>
         )}
       </div>
 
-      <p style={{ opacity: 0.7 }}>
-        Columnas mínimas: <b>product_name</b>, <b>unit_cost</b>. Opcional: currency, active_from.
-      </p>
-
-      <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
-        <b>Preview válido:</b> {validRows.length} filas
-        <div style={{ maxHeight: 260, overflow: "auto", marginTop: 8 }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>product_name</th>
-                <th style={{ textAlign: "right", borderBottom: "1px solid #ddd" }}>unit_cost</th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>currency</th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #ddd" }}>active_from</th>
+      <div style={{ marginTop: 12 }} className="tableWrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>product_name</th>
+              <th style={{ textAlign: "right" }}>unit_cost</th>
+              <th>currency</th>
+              <th>active_from</th>
+            </tr>
+          </thead>
+          <tbody>
+            {validRows.slice(0, 50).map((r, i) => (
+              <tr key={i}>
+                <td>{r.product_name}</td>
+                <td style={{ textAlign: "right" }}>{r.unit_cost}</td>
+                <td>{r.currency}</td>
+                <td>{r.active_from ?? "(hoy)"}</td>
               </tr>
-            </thead>
-            <tbody>
-              {validRows.slice(0, 50).map((r, i) => (
-                <tr key={i}>
-                  <td style={{ borderBottom: "1px solid #f2f2f2" }}>{r.product_name}</td>
-                  <td style={{ borderBottom: "1px solid #f2f2f2", textAlign: "right" }}>{r.unit_cost}</td>
-                  <td style={{ borderBottom: "1px solid #f2f2f2" }}>{r.currency}</td>
-                  <td style={{ borderBottom: "1px solid #f2f2f2" }}>{r.active_from ?? "(hoy)"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {validRows.length > 50 && <p style={{ opacity: 0.7 }}>Mostrando 50 de {validRows.length}.</p>}
-        </div>
+            ))}
+          </tbody>
+        </table>
       </div>
+
+      {validRows.length > 50 && (
+        <div className="hint" style={{ marginTop: 8 }}>
+          Mostrando 50 de {validRows.length}.
+        </div>
+      )}
     </div>
   );
 }
