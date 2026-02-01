@@ -9,6 +9,17 @@ const ACTIVE_STATUSES = [
   { key: "dispatched", label: "Despachado", color: "#bfdbfe" },
 ];
 
+// Formato dinero: miles con punto + decimales con coma (es-AR)
+const MONEY_FMT = new Intl.NumberFormat("es-AR", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+function fmtMoney(value) {
+  const n = Number(value ?? 0);
+  return MONEY_FMT.format(Number.isFinite(n) ? n : 0);
+}
+
 // Transiciones permitidas (UI). DB sigue siendo el árbitro final (RLS).
 function allowedTransitions(role, current) {
   // Cocinero: no hace nada
@@ -109,7 +120,6 @@ export default function Kanban({ role, locationId }) {
 
   const move = async (orderId, newStatus) => {
     setMsg("");
-
     const { error } = await supabase.from("orders").update({ status: newStatus }).eq("id", orderId);
 
     if (error) setMsg(error.message);
@@ -117,7 +127,17 @@ export default function Kanban({ role, locationId }) {
   };
 
   const statusLabel = (key) =>
-    key === "in_preparation" ? "En preparación" : key === "new" ? "Nuevo" : key;
+    key === "in_preparation"
+      ? "En preparación"
+      : key === "new"
+        ? "Nuevo"
+        : key === "confirmed"
+          ? "Confirmado"
+          : key === "ready"
+            ? "Listo"
+            : key === "dispatched"
+              ? "Despachado"
+              : key;
 
   return (
     <div>
@@ -163,16 +183,33 @@ export default function Kanban({ role, locationId }) {
           </div>
         )}
 
-        {/* Columns: flex horizontal scroll para teléfono/TV */}
-        <div style={{ marginTop: 14, overflowX: "auto", paddingBottom: 8 }}>
-          <div style={{ display: "flex", gap: 12, minWidth: 980 }}>
+        {/* Columns: grid responsive + scroll horizontal sin cortar la última columna */}
+        <div
+          style={{
+            marginTop: 14,
+            overflowX: "auto",
+            paddingBottom: 8,
+            paddingRight: 12,
+            scrollbarGutter: "stable",
+          }}
+        >
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(5, minmax(220px, 1fr))",
+              gap: 12,
+              width: "100%",
+              minWidth: 1148, // 5*220 + 4*12
+            }}
+          >
             {ACTIVE_STATUSES.map((s) => {
               const list = ordersByStatus[s.key] ?? [];
+
               return (
                 <div
                   key={s.key}
                   style={{
-                    flex: "0 0 240px",
+                    minWidth: 0,
                     background: "#f9fbff",
                     border: "1px solid #e6eaf2",
                     borderRadius: 16,
@@ -189,6 +226,7 @@ export default function Kanban({ role, locationId }) {
                   <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 10, minHeight: 520 }}>
                     {list.map((o) => {
                       const transitions = allowedTransitions(role, o.status);
+
                       return (
                         <div
                           key={o.id}
@@ -202,10 +240,11 @@ export default function Kanban({ role, locationId }) {
                         >
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
                             <div style={{ fontWeight: 800 }}>#{o.order_number}</div>
-                            <div style={{ fontSize: 12, opacity: 0.6 }}>{fmtTime(o.updated_at || o.created_at)}</div>
+                            <div style={{ fontSize: 12, opacity: 0.6 }}>
+                              {fmtTime(o.updated_at || o.created_at)}
+                            </div>
                           </div>
 
-                          {/* Datos visibles por rol */}
                           <div style={{ marginTop: 6, fontSize: 13 }}>
                             {o.customer_name && <div style={{ fontWeight: 700 }}>{o.customer_name}</div>}
                             <div style={{ opacity: 0.75 }}>
@@ -213,7 +252,6 @@ export default function Kanban({ role, locationId }) {
                               {o.channel || ""}
                             </div>
 
-                            {/* Nota cliente (si existe) */}
                             {o.notes ? (
                               <div
                                 style={{
@@ -230,15 +268,13 @@ export default function Kanban({ role, locationId }) {
                               </div>
                             ) : null}
 
-                            {/* Dinero solo admin/operario */}
                             {canSeeMoney ? (
                               <div style={{ marginTop: 8, fontSize: 12, opacity: 0.85 }}>
-                                <b>Total:</b> {o.currency || ""} {Number(o.total || 0).toFixed(2)}
+                                <b>Total:</b> {(o.currency || "").toUpperCase()} {fmtMoney(o.total)}
                               </div>
                             ) : null}
                           </div>
 
-                          {/* Acciones */}
                           <div style={{ marginTop: 10 }}>
                             {!canAct || transitions.length === 0 ? (
                               <div style={{ fontSize: 12, opacity: 0.55 }}>Sin acciones</div>
