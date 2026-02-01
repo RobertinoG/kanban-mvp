@@ -3,14 +3,15 @@ import UploadCosts from "./UploadCosts";
 export default function Costs({ role, locationId }) {
   if (role !== "admin") {
     return (
-      <div style={{ padding: 16, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16 }}>
-        No tenés permiso para ver Costos.
+      <div className="card" style={{ padding: 14 }}>
+        <b>Sin acceso.</b>
+        <div className="hint">Costos está disponible solo para admin.</div>
       </div>
     );
   }
 
   return (
-    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 16 }}>
+    <div style={{ display: "grid", gap: 12 }}>
       <UploadCosts locationId={locationId} />
     </div>
   );
