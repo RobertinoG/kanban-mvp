@@ -1,423 +1,497 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../lib/supabase";
 
-const BG = "#f6f7fb";
-const CARD = "#ffffff";
-const TEXT = "#111827";
-const MUTED = "#6b7280";
-const BORDER = "#e5e7eb";
-
 const ACTIVE_STATUSES = [
-  { key: "new", label: "Nuevo", head: "#dbeafe" },            // azul suave
-  { key: "confirmed", label: "Confirmado", head: "#fde68a" }, // amarillo suave
-  { key: "in_preparation", label: "En preparación", head: "#e9d5ff" }, // violeta suave
-  { key: "ready", label: "Listo", head: "#bbf7d0" },          // verde suave
-  { key: "dispatched", label: "Despachado", head: "#e5e7eb" },// gris suave
+  { key: "new", label: "Nuevo", color: "#dbeafe" },
+  { key: "confirmed", label: "Confirmado", color: "#fde68a" },
+  { key: "in_preparation", label: "En preparación", color: "#e9d5ff" },
+  { key: "ready", label: "Listo", color: "#bbf7d0" },
+  { key: "dispatched", label: "Despachado", color: "#bfdbfe" },
 ];
 
-// Transiciones por rol (ajustado a lo que venís usando)
-const ROLE_TRANSITIONS = {
-  operario: {
-    new: ["confirmed"],
-    ready: ["dispatched"],
-    dispatched: ["completed"],
-  },
-  cocinero: {
-    confirmed: ["in_preparation"],
-    in_preparation: ["ready"],
-  },
-  admin: {
-    new: ["confirmed", "cancelled"],
-    confirmed: ["in_preparation", "cancelled"],
-    in_preparation: ["ready", "cancelled"],
-    ready: ["dispatched", "cancelled"],
-    dispatched: ["completed", "cancelled"],
-  },
-};
+// Transiciones UI por rol (si tu RLS bloquea alguna, la sacamos)
+function allowedTransitions(role, currentStatus) {
+  const map = {
+    operario: {
+      new: ["confirmed", "cancelled"],
+      ready: ["dispatched", "cancelled"],
+      dispatched: ["completed", "cancelled"],
+      confirmed: ["cancelled"],
+      in_preparation: ["cancelled"],
+    },
+    cocinero: {
+      confirmed: ["in_preparation"],
+      in_preparation: ["ready"],
+    },
+    admin: {
+      new: ["confirmed", "in_preparation", "ready", "dispatched", "cancelled"],
+      confirmed: ["in_preparation", "ready", "dispatched", "cancelled"],
+      in_preparation: ["ready", "dispatched", "cancelled"],
+      ready: ["dispatched", "cancelled"],
+      dispatched: ["completed", "cancelled"],
+    },
+  };
 
-function statusLabel(key) {
-  const f = ACTIVE_STATUSES.find((x) => x.key === key);
-  if (f) return f.label;
-  if (key === "completed") return "Completado";
-  if (key === "cancelled") return "Cancelado";
-  return key;
+  return map[role]?.[currentStatus] ?? [];
 }
 
-function allowedTargets(role, currentStatus) {
-  const r = ROLE_TRANSITIONS[role] ?? {};
-  return r[currentStatus] ?? [];
-}
-
-function money(n, currency = "ARS") {
-  const x = Number(n ?? 0);
-  try {
-    return new Intl.NumberFormat("es-AR", { style: "currency", currency }).format(x);
-  } catch {
-    return `${currency} ${x.toFixed(2)}`;
-  }
-}
-
-export default function Kanban({ profile }) {
-  const role = profile?.role ?? null;
-  const locationId = profile?.location_id ?? null;
-
+export default function Kanban({ role, locationId }) {
   const [ordersByStatus, setOrdersByStatus] = useState({});
+  const [itemsByOrder, setItemsByOrder] = useState({});
+  const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // Observaciones: draft por orderId
-  const [draftNotes, setDraftNotes] = useState({});
-  const [savingNote, setSavingNote] = useState({}); // orderId -> bool
+  const [notesOpsDraft, setNotesOpsDraft] = useState({});
+  const [notesKitchenDraft, setNotesKitchenDraft] = useState({});
 
-  // Mobile: vista por tabs
-  const [activeStatus, setActiveStatus] = useState("new");
-  const isMobile = useMemo(
-    () => window.matchMedia && window.matchMedia("(max-width: 900px)").matches,
-    []
-  );
+  const timerRef = useRef(null);
+
+  const canEditOpsNotes = role === "admin" || role === "operario";
+  const canEditKitchenNotes = role === "admin" || role === "cocinero";
 
   const load = async () => {
+    if (!locationId) return;
+    setLoading(true);
     setMsg("");
 
-    const activeKeys = ACTIVE_STATUSES.map((s) => s.key);
-
-    // Traemos más campos para la UI por rol
-    // (items sólo si es cocinero/admin, usando relación order_items)
-    const selectBase =
-      "id,order_number,status,customer_name,customer_phone,channel,created_at,updated_at,is_priority,total,currency,notes,notes_ops,notes_kitchen";
-
-    const selectWithItems =
-      `${selectBase},order_items(id,product_name,qty,unit_price,line_total)`;
-
-    let q = supabase
+    // 1) Trae todos los pedidos activos en una sola query
+    const { data: orders, error } = await supabase
       .from("orders")
-      .select(role === "cocinero" || role === "admin" ? selectWithItems : selectBase)
-      .in("status", activeKeys)
+      .select(
+        "id,order_number,status,customer_name,customer_phone,channel,created_at,updated_at,is_priority,total,currency,notes_ops,notes_kitchen,delivery_address,notes"
+      )
+      .eq("location_id", locationId)
+      .in(
+        "status",
+        ACTIVE_STATUSES.map((s) => s.key)
+      )
       .order("created_at", { ascending: true });
-
-    if (locationId) q = q.eq("location_id", locationId);
-
-    const { data, error } = await q;
 
     if (error) {
       setMsg(error.message);
+      setLoading(false);
       return;
     }
 
+    // Agrupar por status
     const next = {};
     for (const s of ACTIVE_STATUSES) next[s.key] = [];
-    for (const o of data ?? []) {
+    for (const o of orders ?? []) {
       if (!next[o.status]) next[o.status] = [];
       next[o.status].push(o);
     }
-
     setOrdersByStatus(next);
+
+    // 2) Trae items de todos esos pedidos (si hay)
+    const orderIds = (orders ?? []).map((o) => o.id);
+    if (orderIds.length) {
+      const { data: items, error: itemsErr } = await supabase
+        .from("order_items")
+        .select("id,order_id,product_name,qty,unit_price,line_total")
+        .in("order_id", orderIds)
+        .order("id", { ascending: true });
+
+      if (itemsErr) {
+        // No matamos el Kanban por items; sólo avisamos
+        setMsg((m) => m || `Items: ${itemsErr.message}`);
+      } else {
+        const grouped = {};
+        for (const it of items ?? []) {
+          if (!grouped[it.order_id]) grouped[it.order_id] = [];
+          grouped[it.order_id].push(it);
+        }
+        setItemsByOrder(grouped);
+      }
+    } else {
+      setItemsByOrder({});
+    }
+
+    setLoading(false);
   };
 
-  // Auto-refresh silencioso cada 3s
+  // Autorefresh silencioso cada 3s
   useEffect(() => {
     load();
-    const t = setInterval(load, 3000);
-    return () => clearInterval(t);
+    timerRef.current = setInterval(load, 3000);
+    return () => clearInterval(timerRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [role, locationId]);
+  }, [locationId]);
 
   const move = async (orderId, newStatus) => {
     setMsg("");
-    const { error } = await supabase.from("orders").update({ status: newStatus }).eq("id", orderId);
+    const { error } = await supabase
+      .from("orders")
+      .update({ status: newStatus })
+      .eq("id", orderId);
+
     if (error) setMsg(error.message);
     else load();
   };
 
-  const canEditOps = role === "operario" || role === "admin";
-  const canEditKitchen = role === "cocinero" || role === "admin";
-
-  const saveNote = async (orderId, field, value) => {
-    setSavingNote((p) => ({ ...p, [orderId]: true }));
-    setMsg("");
-
-    const patch = {};
-    patch[field] = value;
-
-    const { error } = await supabase.from("orders").update(patch).eq("id", orderId);
+  const saveOpsNote = async (orderId) => {
+    const value = notesOpsDraft[orderId] ?? "";
+    const { error } = await supabase.from("orders").update({ notes_ops: value }).eq("id", orderId);
     if (error) setMsg(error.message);
-    else load();
-
-    setSavingNote((p) => ({ ...p, [orderId]: false }));
+    else setMsg("✅ Observación Operario/Admin guardada");
   };
 
-  const renderCard = (o) => {
-    const targets = allowedTargets(role, o.status);
-
-    // Detalle por rol
-    const showItems = role === "cocinero" || role === "admin";
-    const items = o.order_items ?? [];
-
-    // Draft notes
-    const opsKey = `ops:${o.id}`;
-    const kitKey = `kit:${o.id}`;
-    const opsVal = draftNotes[opsKey] ?? (o.notes_ops ?? "");
-    const kitVal = draftNotes[kitKey] ?? (o.notes_kitchen ?? "");
-
-    return (
-      <div
-        key={o.id}
-        style={{
-          border: `1px solid ${BORDER}`,
-          borderRadius: 14,
-          padding: 12,
-          background: CARD,
-          boxShadow: "0 1px 0 rgba(0,0,0,0.04)",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ fontWeight: 900, fontSize: 16 }}>#{o.order_number}</div>
-            {o.is_priority && (
-              <span
-                style={{
-                  fontSize: 12,
-                  padding: "2px 8px",
-                  borderRadius: 999,
-                  background: "#fee2e2",
-                  color: "#991b1b",
-                  fontWeight: 800,
-                }}
-              >
-                ⚡ Prioridad
-              </span>
-            )}
-          </div>
-          <div style={{ fontSize: 12, color: MUTED }}>
-            {new Date(o.created_at).toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })}
-          </div>
-        </div>
-
-        <div style={{ marginTop: 8 }}>
-          <div style={{ fontWeight: 800 }}>{o.customer_name}</div>
-          <div style={{ color: MUTED, fontSize: 12 }}>{o.customer_phone} • {o.channel}</div>
-          {(role === "admin" || role === "operario") && (
-            <div style={{ marginTop: 6, fontSize: 13 }}>
-              <span style={{ color: MUTED }}>Total:</span>{" "}
-              <b>{money(o.total, o.currency)}</b>
-            </div>
-          )}
-        </div>
-
-        {/* Notas del cliente (si existen) */}
-        {o.notes && (
-          <div style={{ marginTop: 8, fontSize: 12, color: TEXT, background: "#f9fafb", border: `1px dashed ${BORDER}`, padding: 8, borderRadius: 10 }}>
-            <b>Cliente:</b> {o.notes}
-          </div>
-        )}
-
-        {/* Items para cocina/admin */}
-        {showItems && (
-          <div style={{ marginTop: 10 }}>
-            <div style={{ fontWeight: 900, fontSize: 12, color: MUTED, marginBottom: 6 }}>Items</div>
-            {items.length === 0 ? (
-              <div style={{ color: MUTED, fontSize: 12 }}>Sin items</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
-                {items.slice(0, 6).map((it) => (
-                  <div key={it.id} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ opacity: 0.95 }}>{it.qty}× {it.product_name}</span>
-                    <span style={{ color: MUTED }}>
-                      {money(it.line_total ?? (Number(it.qty ?? 0) * Number(it.unit_price ?? 0)), o.currency)}
-                    </span>
-                  </div>
-                ))}
-                {items.length > 6 && <div style={{ color: MUTED }}>+{items.length - 6} más…</div>}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Observaciones por rol */}
-        {(canEditOps || canEditKitchen) && (
-          <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
-            {canEditOps && (
-              <div style={{ background: "#f9fafb", border: `1px solid ${BORDER}`, borderRadius: 12, padding: 10 }}>
-                <div style={{ fontWeight: 900, fontSize: 12, color: MUTED, marginBottom: 6 }}>
-                  Observación Operario/Admin
-                </div>
-                <textarea
-                  value={opsVal}
-                  onChange={(e) => setDraftNotes((p) => ({ ...p, [opsKey]: e.target.value }))}
-                  rows={2}
-                  placeholder="Ej: pago por transferencia OK / falta comprobante / llamar cliente…"
-                  style={{ width: "100%", border: `1px solid ${BORDER}`, borderRadius: 10, padding: 8, resize: "vertical" }}
-                />
-                <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
-                  <button
-                    onClick={() => saveNote(o.id, "notes_ops", opsVal)}
-                    disabled={!!savingNote[o.id]}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: `1px solid ${BORDER}`,
-                      background: "#111827",
-                      color: "#fff",
-                      fontWeight: 800,
-                      cursor: "pointer",
-                      opacity: savingNote[o.id] ? 0.6 : 1,
-                    }}
-                  >
-                    {savingNote[o.id] ? "Guardando…" : "Guardar"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {canEditKitchen && (
-              <div style={{ background: "#f9fafb", border: `1px solid ${BORDER}`, borderRadius: 12, padding: 10 }}>
-                <div style={{ fontWeight: 900, fontSize: 12, color: MUTED, marginBottom: 6 }}>
-                  Observación Cocina
-                </div>
-                <textarea
-                  value={kitVal}
-                  onChange={(e) => setDraftNotes((p) => ({ ...p, [kitKey]: e.target.value }))}
-                  rows={2}
-                  placeholder="Ej: sin cebolla / extra salsa / listo para retirar…"
-                  style={{ width: "100%", border: `1px solid ${BORDER}`, borderRadius: 10, padding: 8, resize: "vertical" }}
-                />
-                <div style={{ marginTop: 8, display: "flex", justifyContent: "flex-end" }}>
-                  <button
-                    onClick={() => saveNote(o.id, "notes_kitchen", kitVal)}
-                    disabled={!!savingNote[o.id]}
-                    style={{
-                      padding: "8px 10px",
-                      borderRadius: 10,
-                      border: `1px solid ${BORDER}`,
-                      background: "#111827",
-                      color: "#fff",
-                      fontWeight: 800,
-                      cursor: "pointer",
-                      opacity: savingNote[o.id] ? 0.6 : 1,
-                    }}
-                  >
-                    {savingNote[o.id] ? "Guardando…" : "Guardar"}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Acciones (solo válidas por rol) */}
-        <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {!role && <span style={{ color: MUTED, fontSize: 12 }}>Cargando rol…</span>}
-
-          {role && targets.length === 0 && (
-            <span style={{ color: MUTED, fontSize: 12 }}>Sin acciones</span>
-          )}
-
-          {role &&
-            targets.map((next) => (
-              <button
-                key={next}
-                onClick={() => move(o.id, next)}
-                style={{
-                  padding: "8px 10px",
-                  borderRadius: 12,
-                  border: `1px solid ${BORDER}`,
-                  background: "#fff",
-                  fontWeight: 900,
-                  cursor: "pointer",
-                }}
-              >
-                → {statusLabel(next)}
-              </button>
-            ))}
-        </div>
-      </div>
-    );
+  const saveKitchenNote = async (orderId) => {
+    const value = notesKitchenDraft[orderId] ?? "";
+    const { error } = await supabase.from("orders").update({ notes_kitchen: value }).eq("id", orderId);
+    if (error) setMsg(error.message);
+    else setMsg("✅ Observación Cocina guardada");
   };
 
-  const renderColumn = (s) => (
-    <div
-      key={s.key}
-      style={{
-        border: `1px solid ${BORDER}`,
-        borderRadius: 16,
-        overflow: "hidden",
-        background: "#fff",
-        minHeight: 640,
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <div style={{ background: s.head, padding: 12, borderBottom: `1px solid ${BORDER}` }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-          <div style={{ fontWeight: 950 }}>{s.label}</div>
-          <div style={{ fontSize: 12, color: MUTED }}>
-            {(ordersByStatus[s.key] ?? []).length}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 12 }}>
-        {(ordersByStatus[s.key] ?? []).map(renderCard)}
-      </div>
-    </div>
-  );
-
-  const gridStyle = isMobile
-    ? { display: "grid", gridTemplateColumns: "1fr", gap: 12, marginTop: 14 }
-    : { display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12, marginTop: 14 };
+  const containerStyle = {
+    background: "#ffffff",
+    border: "1px solid #e5e7eb",
+    borderRadius: 16,
+    padding: 14,
+  };
 
   return (
-    <div style={{ fontFamily: "sans-serif", color: TEXT }}>
+    <div style={containerStyle}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Tablero Kanban</h2>
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>
+            Estados activos. Completados/Cancelados van al Historial.
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {msg && (
+            <span style={{ fontSize: 12, color: msg.includes("✅") ? "#166534" : "#b91c1c" }}>
+              {msg}
+            </span>
+          )}
+          {loading && <span style={{ fontSize: 12, color: "#64748b" }}>Actualizando…</span>}
+        </div>
+      </div>
+
       <div
         style={{
-          background: BG,
-          border: `1px solid ${BORDER}`,
-          borderRadius: 16,
-          padding: 14,
+          marginTop: 12,
+          display: "grid",
+          gap: 12,
+          gridTemplateColumns: "repeat(5, minmax(240px, 1fr))",
+          overflowX: "auto",
+          paddingBottom: 6,
         }}
       >
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <div>
-            <h2 style={{ margin: 0 }}>Tablero Kanban</h2>
-            <div style={{ color: MUTED, fontSize: 13 }}>
-              Estados activos. Completados/Cancelados van al Historial.
-            </div>
-          </div>
+        {ACTIVE_STATUSES.map((s) => (
+          <Column
+            key={s.key}
+            status={s}
+            orders={ordersByStatus[s.key] ?? []}
+            itemsByOrder={itemsByOrder}
+            role={role}
+            move={move}
+            allowedTransitions={allowedTransitions}
+            canEditOpsNotes={canEditOpsNotes}
+            canEditKitchenNotes={canEditKitchenNotes}
+            notesOpsDraft={notesOpsDraft}
+            setNotesOpsDraft={setNotesOpsDraft}
+            notesKitchenDraft={notesKitchenDraft}
+            setNotesKitchenDraft={setNotesKitchenDraft}
+            saveOpsNote={saveOpsNote}
+            saveKitchenNote={saveKitchenNote}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
-          {msg && (
-            <div style={{ color: "#ef4444", fontSize: 13, fontWeight: 700 }}>
-              {msg}
-            </div>
+function Column({
+  status,
+  orders,
+  itemsByOrder,
+  role,
+  move,
+  allowedTransitions,
+  canEditOpsNotes,
+  canEditKitchenNotes,
+  notesOpsDraft,
+  setNotesOpsDraft,
+  notesKitchenDraft,
+  setNotesKitchenDraft,
+  saveOpsNote,
+  saveKitchenNote,
+}) {
+  return (
+    <div
+      style={{
+        background: "#f8fafc",
+        border: "1px solid #e5e7eb",
+        borderRadius: 14,
+        padding: 10,
+        minHeight: 640,
+      }}
+    >
+      <div
+        style={{
+          background: status.color,
+          border: "1px solid #e5e7eb",
+          borderRadius: 12,
+          padding: "10px 10px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          fontWeight: 900,
+        }}
+      >
+        <span>{status.label}</span>
+        <span style={{ fontSize: 12, fontWeight: 800, opacity: 0.8 }}>{orders.length}</span>
+      </div>
+
+      <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10 }}>
+        {orders.map((o) => (
+          <Card
+            key={o.id}
+            o={o}
+            role={role}
+            items={itemsByOrder[o.id] ?? []}
+            transitions={allowedTransitions(role, o.status)}
+            move={move}
+            canEditOpsNotes={canEditOpsNotes}
+            canEditKitchenNotes={canEditKitchenNotes}
+            notesOpsDraft={notesOpsDraft}
+            setNotesOpsDraft={setNotesOpsDraft}
+            notesKitchenDraft={notesKitchenDraft}
+            setNotesKitchenDraft={setNotesKitchenDraft}
+            saveOpsNote={saveOpsNote}
+            saveKitchenNote={saveKitchenNote}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Card({
+  o,
+  role,
+  items,
+  transitions,
+  move,
+  canEditOpsNotes,
+  canEditKitchenNotes,
+  notesOpsDraft,
+  setNotesOpsDraft,
+  notesKitchenDraft,
+  setNotesKitchenDraft,
+  saveOpsNote,
+  saveKitchenNote,
+}) {
+  const created = new Date(o.created_at);
+  const timeStr = created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  const currency = o.currency || "ARS";
+  const total = Number(o.total ?? 0);
+
+  // “Detalle” por rol: lo justo y necesario para operar sin ruido
+  const showCustomerBlock = role !== "cocinero"; // cocinero prioriza items/nota cocina
+  const showItemsBlock = role === "cocinero" || role === "admin";
+  const showAddressNotes = role === "operario" || role === "admin";
+
+  return (
+    <div
+      style={{
+        background: "#ffffff",
+        border: "1px solid #e5e7eb",
+        borderRadius: 14,
+        padding: 12,
+        boxShadow: "0 1px 0 rgba(15, 23, 42, 0.04)",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <span style={{ fontWeight: 900, fontSize: 16 }}>#{o.order_number}</span>
+          <span style={{ fontSize: 12, color: "#64748b" }}>{timeStr}</span>
+          {o.is_priority && (
+            <span
+              style={{
+                fontSize: 11,
+                padding: "2px 8px",
+                borderRadius: 999,
+                background: "#fee2e2",
+                color: "#991b1b",
+                fontWeight: 800,
+              }}
+            >
+              PRIORIDAD
+            </span>
           )}
         </div>
 
-        {/* Mobile tabs */}
-        {isMobile && (
-          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {ACTIVE_STATUSES.map((s) => (
+        <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a" }}>
+          Total: {currency} {total.toFixed(2)}
+        </div>
+      </div>
+
+      {showCustomerBlock && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontWeight: 800 }}>{o.customer_name || "—"}</div>
+          <div style={{ fontSize: 12, color: "#64748b" }}>{o.customer_phone || "—"}</div>
+          <div style={{ fontSize: 12, color: "#64748b" }}>{o.channel || "—"}</div>
+        </div>
+      )}
+
+      {showAddressNotes && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "#334155" }}>
+          {o.delivery_address && (
+            <div>
+              <b>Dirección:</b> {o.delivery_address}
+            </div>
+          )}
+          {o.notes && (
+            <div style={{ marginTop: 4 }}>
+              <b>Cliente:</b> {o.notes}
+            </div>
+          )}
+        </div>
+      )}
+
+      {showItemsBlock && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 900, color: "#0f172a" }}>Items</div>
+          {items.length === 0 ? (
+            <div style={{ fontSize: 12, color: "#64748b" }}>Sin items</div>
+          ) : (
+            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+              {items.map((it) => (
+                <div
+                  key={it.id}
+                  style={{
+                    fontSize: 12,
+                    background: "#f8fafc",
+                    border: "1px solid #e5e7eb",
+                    borderRadius: 10,
+                    padding: "6px 8px",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 10,
+                  }}
+                >
+                  <span style={{ fontWeight: 800 }}>
+                    {it.qty}× {it.product_name}
+                  </span>
+                  <span style={{ color: "#64748b" }}>
+                    {Number(it.line_total ?? 0).toFixed(2)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Observaciones */}
+      <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+        {canEditOpsNotes && (
+          <NoteBox
+            title="Observación Operario/Admin"
+            value={notesOpsDraft[o.id] ?? o.notes_ops ?? ""}
+            onChange={(v) => setNotesOpsDraft((prev) => ({ ...prev, [o.id]: v }))}
+            onSave={() => saveOpsNote(o.id)}
+          />
+        )}
+
+        {canEditKitchenNotes && (
+          <NoteBox
+            title="Observación Cocina"
+            value={notesKitchenDraft[o.id] ?? o.notes_kitchen ?? ""}
+            onChange={(v) => setNotesKitchenDraft((prev) => ({ ...prev, [o.id]: v }))}
+            onSave={() => saveKitchenNote(o.id)}
+          />
+        )}
+      </div>
+
+      {/* Acciones por rol */}
+      <div style={{ marginTop: 12 }}>
+        {transitions.length === 0 ? (
+          <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700 }}>Sin acciones</div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {transitions.map((st) => (
               <button
-                key={s.key}
-                onClick={() => setActiveStatus(s.key)}
+                key={st}
+                onClick={() => move(o.id, st)}
                 style={{
+                  border: "1px solid #0f172a",
+                  background: "#0f172a",
+                  color: "white",
                   padding: "8px 10px",
-                  borderRadius: 999,
-                  border: `1px solid ${activeStatus === s.key ? "#111827" : BORDER}`,
-                  background: activeStatus === s.key ? "#111827" : "#fff",
-                  color: activeStatus === s.key ? "#fff" : TEXT,
+                  borderRadius: 10,
+                  fontSize: 12,
                   fontWeight: 900,
                 }}
               >
-                {s.label} ({(ordersByStatus[s.key] ?? []).length})
+                {labelForStatus(st)}
               </button>
             ))}
           </div>
         )}
-
-        <div style={gridStyle}>
-          {isMobile
-            ? renderColumn(ACTIVE_STATUSES.find((x) => x.key === activeStatus) ?? ACTIVE_STATUSES[0])
-            : ACTIVE_STATUSES.map(renderColumn)}
-        </div>
       </div>
     </div>
   );
+}
+
+function NoteBox({ title, value, onChange, onSave }) {
+  return (
+    <div
+      style={{
+        border: "1px solid #e5e7eb",
+        background: "#ffffff",
+        borderRadius: 12,
+        padding: 10,
+      }}
+    >
+      <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6 }}>{title}</div>
+      <textarea
+        rows={3}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Ej: pago por transferencia OK / sin cebolla / extra salsa…"
+        style={{
+          width: "100%",
+          border: "1px solid #e5e7eb",
+          borderRadius: 10,
+          padding: 8,
+          fontSize: 12,
+          resize: "vertical",
+          background: "#f8fafc",
+        }}
+      />
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+        <button
+          onClick={onSave}
+          style={{
+            border: "1px solid #0f172a",
+            background: "#0f172a",
+            color: "white",
+            padding: "8px 12px",
+            borderRadius: 10,
+            fontWeight: 900,
+            fontSize: 12,
+          }}
+        >
+          Guardar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function labelForStatus(k) {
+  const map = {
+    confirmed: "→ Confirmado",
+    in_preparation: "→ En preparación",
+    ready: "→ Listo",
+    dispatched: "→ Despachado",
+    completed: "→ Completado",
+    cancelled: "→ Cancelado",
+  };
+  return map[k] ?? `→ ${k}`;
 }
