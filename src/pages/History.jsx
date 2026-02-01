@@ -1,182 +1,216 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabase";
 
-function useInterval(fn, ms) {
-  const ref = useRef(fn);
-  useEffect(() => { ref.current = fn; }, [fn]);
-  useEffect(() => {
-    const id = setInterval(() => ref.current(), ms);
-    return () => clearInterval(id);
-  }, [ms]);
-}
-
-function fmtDateHeader(iso) {
-  const d = new Date(iso);
-  return d.toLocaleDateString(undefined, { weekday: "short", year: "numeric", month: "short", day: "2-digit" });
+function groupByDate(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const d = new Date(r.updated_at || r.created_at);
+    const key = d.toLocaleDateString("es-AR", { weekday: "short", year: "numeric", month: "short", day: "2-digit" });
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(r);
+  }
+  return Array.from(map.entries());
 }
 
 function fmtTime(iso) {
+  if (!iso) return "";
   const d = new Date(iso);
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function statusBadge(status) {
-  if (status === "completed") return <span className="badge ok">completed</span>;
-  if (status === "cancelled") return <span className="badge danger">cancelled</span>;
-  return <span className="badge">{status}</span>;
+  return d.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" });
 }
 
 export default function History({ role, locationId }) {
-  // Cocinero NO debe ver historial
-  if (role === "cocinero") {
-    return (
-      <div className="card" style={{ padding: 14 }}>
-        <b>Sin acceso.</b>
-        <div className="hint">El historial está disponible para admin y operario.</div>
-      </div>
-    );
-  }
-
+  const allowed = role === "admin" || role === "operario";
   const [days, setDays] = useState(7);
   const [q, setQ] = useState("");
   const [rows, setRows] = useState([]);
   const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [modal, setModal] = useState(null);
+  const [detail, setDetail] = useState(null);
 
-  const timeMin = useMemo(() => {
+  const sinceISO = useMemo(() => {
     const d = new Date();
-    d.setDate(d.getDate() - Number(days));
+    d.setDate(d.getDate() - Number(days || 7));
     return d.toISOString();
   }, [days]);
 
-  const load = async (silent = false) => {
-    if (!locationId) return;
-    if (!silent) setBusy(true);
+  const load = async () => {
     setMsg("");
+
+    if (!allowed) return;
 
     let query = supabase
       .from("orders")
-      .select("id,order_number,status,channel,updated_at,created_at,total,currency,notes")
-      .eq("location_id", locationId)
+      .select("id,order_number,status,customer_name,customer_phone,channel,total,currency,notes,created_at,updated_at")
       .in("status", ["completed", "cancelled"])
-      .gte("updated_at", timeMin)
-      .order("updated_at", { ascending: false });
+      .gte("updated_at", sinceISO);
 
-    const term = q.trim();
-    if (term) {
-      // búsqueda simple: order_number o notes
-      // order_number es numérico; usamos ilike sobre texto en notes y channel,
-      // y exact match numérico si el término es número.
-      if (/^\d+$/.test(term)) query = query.eq("order_number", Number(term));
-      else query = query.ilike("notes", `%${term}%`);
+    if (locationId) query = query.eq("location_id", locationId);
+
+    if (q.trim()) {
+      // filtro simple: por nombre, teléfono o #pedido
+      const like = `%${q.trim()}%`;
+      query = query.or(
+        `customer_name.ilike.${like},customer_phone.ilike.${like},order_number::text.ilike.${like}`
+      );
     }
 
-    const { data, error } = await query;
+    const { data, error } = await query.order("updated_at", { ascending: false });
 
-    if (error) {
-      setMsg(error.message);
-      if (!silent) setBusy(false);
-      return;
-    }
-    setRows(data || []);
-    if (!silent) setBusy(false);
+    if (error) setMsg(error.message);
+    else setRows(data ?? []);
   };
 
-  useEffect(() => { load(false); }, [locationId, days]); // eslint-disable-line
-  useInterval(() => load(true), 6000);
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days, q, locationId, allowed]);
 
-  const grouped = useMemo(() => {
-    const map = new Map();
-    for (const r of rows) {
-      const key = (r.updated_at || r.created_at || "").slice(0, 10);
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(r);
-    }
-    return Array.from(map.entries()).sort((a, b) => (a[0] < b[0] ? 1 : -1));
-  }, [rows]);
+  if (!allowed) {
+    return (
+      <div style={{ padding: 14, background: "#fff", border: "1px solid #e6eaf2", borderRadius: 16 }}>
+        No autorizado.
+      </div>
+    );
+  }
+
+  const grouped = groupByDate(rows);
 
   return (
-    <div className="card" style={{ padding: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+    <div
+      style={{
+        background: "#fff",
+        border: "1px solid #e6eaf2",
+        borderRadius: 16,
+        padding: 14,
+        boxShadow: "0 10px 30px rgba(16,24,40,.06)",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
         <div>
-          <div className="sectionTitle">Historial</div>
-          <div className="hint">Cerrados (completed/cancelled). Agrupados por fecha de cierre (updated_at).</div>
-          {msg && <div style={{ marginTop: 8, color: "#b91c1c", fontWeight: 800 }}>{msg}</div>}
+          <h2 style={{ margin: 0 }}>Historial</h2>
+          <div style={{ opacity: 0.7, fontSize: 13 }}>
+            Cerrados (completed/cancelled). Agrupados por fecha de cierre (updated_at).
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           <select
-            className="input"
-            style={{ width: 160 }}
             value={days}
             onChange={(e) => setDays(Number(e.target.value))}
+            style={{ padding: "8px 10px", borderRadius: 12, border: "1px solid #d6dbe6" }}
           >
-            <option value={1}>Último 1 día</option>
-            <option value={3}>Últimos 3 días</option>
+            <option value={1}>Últimas 24h</option>
             <option value={7}>Últimos 7 días</option>
             <option value={30}>Últimos 30 días</option>
+            <option value={90}>Últimos 90 días</option>
           </select>
 
           <input
-            className="input"
-            style={{ width: 320 }}
-            placeholder="Buscar por #pedido (ej 12) o por nota"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") load(false);
+            placeholder="Buscar por cliente, teléfono o #pedido"
+            style={{
+              width: 320,
+              maxWidth: "100%",
+              padding: "8px 10px",
+              borderRadius: 12,
+              border: "1px solid #d6dbe6",
+              outline: "none",
             }}
           />
-
-          <button className="btn" onClick={() => load(false)} disabled={busy}>
-            {busy ? "Buscando..." : "Buscar"}
-          </button>
         </div>
       </div>
 
-      <div className="hint" style={{ marginTop: 10 }}>
-        Mostrando {rows.length} pedidos.
-      </div>
+      {msg && (
+        <div
+          style={{
+            marginTop: 10,
+            background: "#fff3f3",
+            border: "1px solid #ffd1d1",
+            padding: 10,
+            borderRadius: 12,
+            color: "#b42318",
+            fontSize: 13,
+          }}
+        >
+          {msg}
+        </div>
+      )}
 
-      <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-        {grouped.map(([day, items]) => (
+      <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 14 }}>
+        {grouped.length === 0 ? (
+          <div style={{ opacity: 0.7 }}>Sin pedidos cerrados en el período.</div>
+        ) : null}
+
+        {grouped.map(([day, list]) => (
           <div key={day}>
-            <div style={{ fontWeight: 900, margin: "14px 0 8px" }}>
-              {day ? fmtDateHeader(day) : "Sin fecha"}
-            </div>
+            <div style={{ fontWeight: 800, marginBottom: 10 }}>{day}</div>
 
-            <div style={{ display: "grid", gap: 10 }}>
-              {items.map((o) => (
-                <div key={o.id} className="orderCard" style={{ marginBottom: 0 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                    <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
-                      <div style={{ minWidth: 90 }}>
-                        <div className="orderId">#{o.order_number}</div>
-                        <div className="orderMeta">{o.updated_at ? fmtTime(o.updated_at) : ""}</div>
-                      </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {list.map((o) => (
+                <div
+                  key={o.id}
+                  style={{
+                    border: "1px solid #e6eaf2",
+                    borderRadius: 14,
+                    padding: 12,
+                    display: "grid",
+                    gridTemplateColumns: "140px 1fr 220px 90px",
+                    gap: 10,
+                    alignItems: "center",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 800 }}>#{o.order_number}</div>
+                    <div style={{ fontSize: 12, opacity: 0.65 }}>{fmtTime(o.updated_at || o.created_at)}</div>
+                    <span
+                      style={{
+                        display: "inline-block",
+                        marginTop: 6,
+                        fontSize: 12,
+                        padding: "2px 10px",
+                        borderRadius: 999,
+                        border: "1px solid #e6eaf2",
+                        background: o.status === "completed" ? "#dcfce7" : "#fee2e2",
+                      }}
+                    >
+                      {o.status}
+                    </span>
+                  </div>
 
-                      <div style={{ minWidth: 120 }}>{statusBadge(o.status)}</div>
-
-                      <div className="orderMeta">
-                        {o.channel || ""}
-                        {o.notes ? ` • ${o.notes}` : ""}
-                      </div>
+                  <div style={{ fontSize: 13 }}>
+                    <div style={{ fontWeight: 700 }}>{o.customer_name || "-"}</div>
+                    <div style={{ opacity: 0.75 }}>
+                      {o.customer_phone ? `${o.customer_phone} · ` : ""}{o.channel || ""}
                     </div>
+                    {o.notes ? (
+                      <div style={{ marginTop: 6, fontSize: 12, opacity: 0.7 }}>
+                        <b>Nota:</b> {o.notes}
+                      </div>
+                    ) : null}
+                  </div>
 
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <span className="badge">
-                        {o.currency || "ARS"} {Number(o.total || 0).toFixed(2)}
-                      </span>
-
-                      <button
-                        className="smallBtn"
-                        style={{ padding: "8px 10px", fontSize: 12 }}
-                        onClick={() => setModal(o)}
-                      >
-                        Detalle
-                      </button>
+                  <div style={{ fontSize: 13, textAlign: "right" }}>
+                    <div style={{ opacity: 0.7 }}>Total</div>
+                    <div style={{ fontWeight: 900 }}>
+                      {o.currency || ""} {Number(o.total || 0).toFixed(2)}
                     </div>
+                  </div>
+
+                  <div style={{ textAlign: "right" }}>
+                    <button
+                      onClick={() => setDetail(o)}
+                      style={{
+                        padding: "8px 10px",
+                        borderRadius: 12,
+                        border: "1px solid #111827",
+                        background: "#111827",
+                        color: "#fff",
+                        cursor: "pointer",
+                        fontSize: 12,
+                      }}
+                    >
+                      Detalle
+                    </button>
                   </div>
                 </div>
               ))}
@@ -185,20 +219,63 @@ export default function History({ role, locationId }) {
         ))}
       </div>
 
-      {modal && (
-        <div className="modalBackdrop" onClick={() => setModal(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-              <div style={{ fontWeight: 900, fontSize: 18 }}>Pedido #{modal.order_number}</div>
-              <button className="btn" onClick={() => setModal(null)}>Cerrar</button>
+      {/* Modal detalle (simple) */}
+      {detail && (
+        <div
+          onClick={() => setDetail(null)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,.35)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 50,
+            padding: 14,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 620,
+              background: "#fff",
+              borderRadius: 16,
+              border: "1px solid #e6eaf2",
+              padding: 16,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+              <div>
+                <div style={{ fontWeight: 900, fontSize: 18 }}>Pedido #{detail.order_number}</div>
+                <div style={{ opacity: 0.7, fontSize: 13 }}>
+                  {detail.status} · {detail.channel}
+                </div>
+              </div>
+              <button
+                onClick={() => setDetail(null)}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: 12,
+                  border: "1px solid #d6dbe6",
+                  background: "#fff",
+                  cursor: "pointer",
+                }}
+              >
+                Cerrar
+              </button>
             </div>
 
-            <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
-              <div><b>Estado:</b> {modal.status}</div>
-              <div><b>Canal:</b> {modal.channel || "-"}</div>
-              <div><b>Cierre:</b> {modal.updated_at || "-"}</div>
-              <div><b>Total:</b> {modal.currency || "ARS"} {Number(modal.total || 0).toFixed(2)}</div>
-              <div><b>Nota cliente:</b> {modal.notes || "-"}</div>
+            <div style={{ marginTop: 12, fontSize: 13 }}>
+              <div><b>Cliente:</b> {detail.customer_name || "-"}</div>
+              <div><b>Tel:</b> {detail.customer_phone || "-"}</div>
+              <div style={{ marginTop: 10 }}>
+                <b>Total:</b> {detail.currency || ""} {Number(detail.total || 0).toFixed(2)}
+              </div>
+              {detail.notes ? (
+                <div style={{ marginTop: 10 }}>
+                  <b>Nota cliente:</b> {detail.notes}
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
