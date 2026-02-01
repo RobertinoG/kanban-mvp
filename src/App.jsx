@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabase";
 
 import Login from "./pages/Login";
@@ -9,208 +9,153 @@ import Costs from "./pages/Costs";
 export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null); // { role, location_id }
-  const [tab, setTab] = useState("kanban");
-  const [loadingProfile, setLoadingProfile] = useState(false);
-  const [err, setErr] = useState("");
+  const [view, setView] = useState("kanban");
+  const [bootError, setBootError] = useState("");
 
-  // CSS global para matar el "gris a la derecha" + fondo claro uniforme
-  const GlobalStyle = useMemo(
-    () => (
-      <style>{`
-        html, body, #root { height: 100%; width: 100%; }
-        body { margin: 0; background: #f6f7fb; color: #0f172a; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
-        * { box-sizing: border-box; }
-        button { cursor: pointer; }
-      `}</style>
-    ),
-    []
-  );
-
+  // 1) Sesión
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-
     const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
       setSession(sess);
       setProfile(null);
-      setErr("");
-      setTab("kanban");
+      setBootError("");
+      setView("kanban");
     });
-
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Cargar role/location del usuario logueado (location_users)
+  // 2) Perfil (role/location) desde location_users
   useEffect(() => {
-    const loadProfile = async () => {
-      setErr("");
-      if (!session?.user) return;
-
-      setLoadingProfile(true);
-      const userId = session.user.id;
+    const run = async () => {
+      if (!session?.user?.id) return;
 
       const { data, error } = await supabase
         .from("location_users")
         .select("role, location_id")
-        .eq("user_id", userId)
+        .eq("user_id", session.user.id)
         .single();
 
       if (error) {
-        setErr(`Error leyendo location_users: ${error.message}`);
+        setBootError(`Error leyendo location_users: ${error.message}`);
         setProfile(null);
-      } else {
-        setProfile(data);
+        return;
       }
-      setLoadingProfile(false);
+      setProfile(data);
     };
+    run();
+  }, [session?.user?.id]);
 
-    loadProfile();
-  }, [session]);
+  if (!session) return <Login />;
+  if (bootError) return <div style={{ padding: 20, color: "crimson" }}>{bootError}</div>;
+  if (!profile) return <div style={{ padding: 20 }}>Cargando perfil…</div>;
 
-  const role = profile?.role ?? "";
-  const locationId = profile?.location_id ?? "";
+  const role = profile.role;
+  const locationId = profile.location_id;
 
-  const canSeeHistory = role === "admin" || role === "operario";
+  const canSeeHistory = role === "admin"; // operario NO (según tu último pedido)
   const canSeeCosts = role === "admin";
+  const canDoActions = role === "admin" || role === "operario"; // cocinero read-only
 
-  // Evita que el cocinero se quede en tabs que no le corresponden
+  // Si el usuario está en una vista no permitida, lo devolvemos a kanban
   useEffect(() => {
-    if (tab === "history" && !canSeeHistory) setTab("kanban");
-    if (tab === "costs" && !canSeeCosts) setTab("kanban");
-  }, [tab, canSeeHistory, canSeeCosts]);
-
-  if (!session) {
-    return (
-      <>
-        {GlobalStyle}
-        <Login />
-      </>
-    );
-  }
+    if (view === "history" && !canSeeHistory) setView("kanban");
+    if (view === "costs" && !canSeeCosts) setView("kanban");
+  }, [view, canSeeHistory, canSeeCosts]);
 
   return (
-    <>
-      {GlobalStyle}
-
-      <div style={{ minHeight: "100vh", width: "100vw" }}>
-        {/* Topbar */}
-        <div
-          style={{
-            position: "sticky",
-            top: 0,
-            zIndex: 10,
-            background: "#ffffff",
-            borderBottom: "1px solid #e5e7eb",
-          }}
-        >
-          <div
+    <div style={{ minHeight: "100vh", background: "#f6f7fb" }}>
+      {/* Top bar */}
+      <div
+        style={{
+          display: "flex",
+          gap: 10,
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "10px 14px",
+          borderBottom: "1px solid #e5e7eb",
+          background: "#ffffff",
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+        }}
+      >
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <strong style={{ fontFamily: "system-ui" }}>Kanban MVP</strong>
+          <span
             style={{
-              maxWidth: 1400,
-              margin: "0 auto",
-              padding: "10px 14px",
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              justifyContent: "space-between",
+              fontSize: 12,
+              background: "#eef2ff",
+              border: "1px solid #c7d2fe",
+              padding: "2px 8px",
+              borderRadius: 999,
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <strong style={{ letterSpacing: 0.2 }}>Kanban MVP</strong>
-
-              <div style={{ display: "flex", gap: 8 }}>
-                <TabBtn active={tab === "kanban"} onClick={() => setTab("kanban")}>
-                  Kanban
-                </TabBtn>
-
-                {canSeeHistory && (
-                  <TabBtn active={tab === "history"} onClick={() => setTab("history")}>
-                    Historial
-                  </TabBtn>
-                )}
-
-                {canSeeCosts && (
-                  <TabBtn active={tab === "costs"} onClick={() => setTab("costs")}>
-                    Costos
-                  </TabBtn>
-                )}
-              </div>
-
-              <span
-                style={{
-                  fontSize: 12,
-                  padding: "4px 8px",
-                  borderRadius: 999,
-                  background: "#f1f5f9",
-                  border: "1px solid #e2e8f0",
-                  color: "#334155",
-                }}
-              >
-                Rol: <b>{role || (loadingProfile ? "cargando..." : "sin rol")}</b>
-              </span>
-
-              {err && (
-                <span style={{ fontSize: 12, color: "#b91c1c" }}>
-                  {err}
-                </span>
-              )}
-            </div>
-
-            <button
-              onClick={() => supabase.auth.signOut()}
-              style={{
-                border: "1px solid #e5e7eb",
-                background: "#0f172a",
-                color: "white",
-                padding: "8px 12px",
-                borderRadius: 10,
-                fontWeight: 600,
-              }}
-            >
-              Salir
-            </button>
-          </div>
+            Rol: {role}
+          </span>
         </div>
 
-        {/* Contenido */}
-        <div style={{ maxWidth: 1400, margin: "0 auto", padding: "14px" }}>
-          {!profile ? (
-            <div
-              style={{
-                background: "white",
-                border: "1px solid #e5e7eb",
-                borderRadius: 14,
-                padding: 16,
-              }}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            onClick={() => setView("kanban")}
+            style={tabStyle(view === "kanban")}
+          >
+            Kanban
+          </button>
+
+          {canSeeHistory && (
+            <button
+              onClick={() => setView("history")}
+              style={tabStyle(view === "history")}
             >
-              Cargando perfil…
-            </div>
-          ) : (
-            <>
-              {tab === "kanban" && <Kanban role={role} locationId={locationId} />}
-              {tab === "history" && canSeeHistory && <History role={role} locationId={locationId} />}
-              {tab === "costs" && canSeeCosts && <Costs role={role} locationId={locationId} />}
-            </>
+              Historial
+            </button>
           )}
+
+          {canSeeCosts && (
+            <button
+              onClick={() => setView("costs")}
+              style={tabStyle(view === "costs")}
+            >
+              Costos
+            </button>
+          )}
+
+          <button
+            onClick={() => supabase.auth.signOut()}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 10,
+              border: "1px solid #e5e7eb",
+              background: "#111827",
+              color: "white",
+              cursor: "pointer",
+            }}
+          >
+            Salir
+          </button>
         </div>
       </div>
-    </>
+
+      {/* Content */}
+      <div style={{ padding: 14 }}>
+        {view === "kanban" && (
+          <Kanban role={role} locationId={locationId} canDoActions={canDoActions} />
+        )}
+        {view === "history" && <History role={role} locationId={locationId} />}
+        {view === "costs" && <Costs locationId={locationId} />}
+      </div>
+    </div>
   );
 }
 
-function TabBtn({ active, onClick, children }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: active ? "1px solid #0f172a" : "1px solid #e5e7eb",
-        background: active ? "#0f172a" : "#ffffff",
-        color: active ? "white" : "#0f172a",
-        padding: "8px 12px",
-        borderRadius: 10,
-        fontWeight: 700,
-        fontSize: 13,
-      }}
-    >
-      {children}
-    </button>
-  );
+function tabStyle(active) {
+  return {
+    padding: "8px 12px",
+    borderRadius: 10,
+    border: active ? "1px solid #111827" : "1px solid #e5e7eb",
+    background: active ? "#111827" : "#ffffff",
+    color: active ? "#ffffff" : "#111827",
+    cursor: "pointer",
+    fontWeight: 600,
+  };
 }
