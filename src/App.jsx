@@ -2,22 +2,23 @@ import { useEffect, useState } from "react";
 import { supabase } from "./lib/supabase";
 import Login from "./pages/Login";
 import Kanban from "./pages/Kanban";
-import UploadCosts from "./pages/UploadCosts"; // si todavía no lo tenés, comentá esta línea
+import History from "./pages/History";
+import UploadCosts from "./pages/UploadCosts"; // si no existe aún, comentá esta línea
 
 export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null); // { role, location_id }
-  const [view, setView] = useState("kanban"); // "kanban" | "costs"
+  const [view, setView] = useState("kanban"); // "kanban" | "history" | "costs"
   const [topMsg, setTopMsg] = useState("");
 
-  // 1) Mantener sesión
+  // Mantener sesión
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
     const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // 2) Cargar rol + location_id
+  // Cargar rol + location_id
   useEffect(() => {
     const loadProfile = async () => {
       setTopMsg("");
@@ -44,6 +45,9 @@ export default function App() {
         return;
       }
       setProfile(data);
+
+      // Si estás en "costs" pero no sos admin, te mando a kanban
+      if (data.role !== "admin" && view === "costs") setView("kanban");
     };
 
     if (session) loadProfile();
@@ -52,6 +56,7 @@ export default function App() {
       setView("kanban");
       setTopMsg("");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
   if (!session) return <Login />;
@@ -64,18 +69,16 @@ export default function App() {
           display: "flex",
           justifyContent: "space-between",
           gap: 10,
+          flexWrap: "wrap",
+          alignItems: "center",
           fontFamily: "sans-serif",
           borderBottom: "1px solid #eee",
-          alignItems: "center",
-          flexWrap: "wrap",
         }}
       >
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <button onClick={() => setView("kanban")}>Kanban</button>
-
-          {profile?.role === "admin" && (
-            <button onClick={() => setView("costs")}>Costos</button>
-          )}
+          <button onClick={() => setView("history")}>Historial</button>
+          {profile?.role === "admin" && <button onClick={() => setView("costs")}>Costos</button>}
 
           <span style={{ opacity: 0.7 }}>
             Rol: <b>{profile?.role ?? "..."}</b>
@@ -88,6 +91,7 @@ export default function App() {
       </div>
 
       {view === "kanban" && <Kanban profile={profile} />}
+      {view === "history" && <History profile={profile} />}
 
       {view === "costs" && profile?.role === "admin" && (
         <UploadCosts locationId={profile.location_id} />
