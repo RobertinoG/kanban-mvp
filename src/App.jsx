@@ -1,309 +1,216 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabase";
+
 import Login from "./pages/Login";
 import Kanban from "./pages/Kanban";
 import History from "./pages/History";
-import UploadCosts from "./pages/UploadCosts";
-
-const APP_BG = "#f6f7fb";
-const CARD_BG = "#ffffff";
-const TEXT = "#111827";
-const MUTED = "#6b7280";
-const BORDER = "#e5e7eb";
-
-const ROLE_ACTION_STATUSES = {
-  operario: ["new", "ready", "dispatched"],
-  cocinero: ["confirmed", "in_preparation"],
-};
-
-function Badge({ children }) {
-  return (
-    <span
-      style={{
-        padding: "2px 8px",
-        borderRadius: 999,
-        border: `1px solid ${BORDER}`,
-        background: "#fff",
-        fontSize: 12,
-        color: TEXT,
-      }}
-    >
-      {children}
-    </span>
-  );
-}
-
-function TabButton({ active, onClick, children, rightBadge }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: "8px 12px",
-        borderRadius: 10,
-        border: `1px solid ${active ? "#111827" : BORDER}`,
-        background: active ? "#111827" : "#fff",
-        color: active ? "#fff" : TEXT,
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        fontWeight: 600,
-      }}
-    >
-      {children}
-      {typeof rightBadge === "number" && rightBadge > 0 && (
-        <span
-          style={{
-            background: "#ef4444",
-            color: "#fff",
-            borderRadius: 999,
-            padding: "2px 8px",
-            fontSize: 12,
-            fontWeight: 700,
-          }}
-        >
-          {rightBadge}
-        </span>
-      )}
-    </button>
-  );
-}
+import Costs from "./pages/Costs";
 
 export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null); // { role, location_id }
-  const [view, setView] = useState("kanban"); // kanban | history | costs | alerts
-  const [topMsg, setTopMsg] = useState("");
+  const [tab, setTab] = useState("kanban");
+  const [loadingProfile, setLoadingProfile] = useState(false);
+  const [err, setErr] = useState("");
 
-  // Notificaciones (solo operario/cocinero)
-  const [alerts, setAlerts] = useState([]);
-  const alertsCount = alerts.length;
+  // CSS global para matar el "gris a la derecha" + fondo claro uniforme
+  const GlobalStyle = useMemo(
+    () => (
+      <style>{`
+        html, body, #root { height: 100%; width: 100%; }
+        body { margin: 0; background: #f6f7fb; color: #0f172a; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+        * { box-sizing: border-box; }
+        button { cursor: pointer; }
+      `}</style>
+    ),
+    []
+  );
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+      setProfile(null);
+      setErr("");
+      setTab("kanban");
+    });
+
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Cargar role/location del usuario logueado (location_users)
   useEffect(() => {
     const loadProfile = async () => {
-      setTopMsg("");
-      setProfile(null);
+      setErr("");
+      if (!session?.user) return;
 
-      const { data: u, error: uErr } = await supabase.auth.getUser();
-      if (uErr) {
-        setTopMsg(uErr.message);
-        return;
-      }
-      const user = u?.user;
-      if (!user) return;
+      setLoadingProfile(true);
+      const userId = session.user.id;
 
       const { data, error } = await supabase
         .from("location_users")
         .select("role, location_id")
-        .eq("user_id", user.id)
+        .eq("user_id", userId)
         .single();
 
       if (error) {
-        setTopMsg(`No pude leer role/location: ${error.message}`);
-        return;
+        setErr(`Error leyendo location_users: ${error.message}`);
+        setProfile(null);
+      } else {
+        setProfile(data);
       }
-      setProfile(data);
-
-      // si no es admin, no puede quedar parado en costs
-      if (data.role !== "admin" && view === "costs") setView("kanban");
-      // si es admin, ocultamos alerts
-      if (data.role === "admin" && view === "alerts") setView("kanban");
+      setLoadingProfile(false);
     };
 
-    if (session) loadProfile();
-    else {
-      setProfile(null);
-      setView("kanban");
-      setTopMsg("");
-      setAlerts([]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    loadProfile();
   }, [session]);
 
-  const canSeeAlerts = useMemo(() => {
-    const r = profile?.role;
-    return r === "operario" || r === "cocinero";
-  }, [profile?.role]);
+  const role = profile?.role ?? "";
+  const locationId = profile?.location_id ?? "";
 
-  // Cargar alertas cada 5s (silencioso)
+  const canSeeHistory = role === "admin" || role === "operario";
+  const canSeeCosts = role === "admin";
+
+  // Evita que el cocinero se quede en tabs que no le corresponden
   useEffect(() => {
-    if (!session || !profile?.role) return;
+    if (tab === "history" && !canSeeHistory) setTab("kanban");
+    if (tab === "costs" && !canSeeCosts) setTab("kanban");
+  }, [tab, canSeeHistory, canSeeCosts]);
 
-    const role = profile.role;
-    if (!(role === "operario" || role === "cocinero")) {
-      setAlerts([]);
-      return;
-    }
-
-    const loadAlerts = async () => {
-      const statuses = ROLE_ACTION_STATUSES[role] ?? [];
-      if (statuses.length === 0) {
-        setAlerts([]);
-        return;
-      }
-
-      let q = supabase
-        .from("orders")
-        .select("id,order_number,status,customer_name,channel,updated_at")
-        .in("status", statuses)
-        .order("updated_at", { ascending: false })
-        .limit(30);
-
-      if (profile?.location_id) q = q.eq("location_id", profile.location_id);
-
-      const { data, error } = await q;
-      if (error) return; // no “rompemos” el UX por alertas
-      setAlerts(data ?? []);
-    };
-
-    loadAlerts();
-    const t = setInterval(loadAlerts, 5000);
-    return () => clearInterval(t);
-  }, [session, profile?.role, profile?.location_id]);
-
-  if (!session) return <Login />;
+  if (!session) {
+    return (
+      <>
+        {GlobalStyle}
+        <Login />
+      </>
+    );
+  }
 
   return (
-    <div style={{ minHeight: "100vh", background: APP_BG, color: TEXT }}>
-      {/* Top bar */}
-      <div
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 20,
-          background: APP_BG,
-          borderBottom: `1px solid ${BORDER}`,
-        }}
-      >
+    <>
+      {GlobalStyle}
+
+      <div style={{ minHeight: "100vh", width: "100vw" }}>
+        {/* Topbar */}
         <div
           style={{
-            maxWidth: 1200,
-            margin: "0 auto",
-            padding: "14px 14px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 10,
-            flexWrap: "wrap",
-            fontFamily: "sans-serif",
+            position: "sticky",
+            top: 0,
+            zIndex: 10,
+            background: "#ffffff",
+            borderBottom: "1px solid #e5e7eb",
           }}
         >
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <TabButton active={view === "kanban"} onClick={() => setView("kanban")}>
-              Kanban
-            </TabButton>
-
-            <TabButton active={view === "history"} onClick={() => setView("history")}>
-              Historial
-            </TabButton>
-
-            {profile?.role === "admin" && (
-              <TabButton active={view === "costs"} onClick={() => setView("costs")}>
-                Costos
-              </TabButton>
-            )}
-
-            {canSeeAlerts && (
-              <TabButton
-                active={view === "alerts"}
-                onClick={() => setView("alerts")}
-                rightBadge={alertsCount}
-              >
-                Notificaciones
-              </TabButton>
-            )}
-
-            <Badge>Rol: <b>{profile?.role ?? "..."}</b></Badge>
-
-            {topMsg && <span style={{ color: "#ef4444", fontSize: 13 }}>{topMsg}</span>}
-          </div>
-
-          <button
-            onClick={() => supabase.auth.signOut()}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 10,
-              border: `1px solid ${BORDER}`,
-              background: CARD_BG,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            Salir
-          </button>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: 14 }}>
-        {view === "kanban" && <Kanban profile={profile} />}
-
-        {view === "history" && <History profile={profile} />}
-
-        {view === "costs" && profile?.role === "admin" && (
-          <UploadCosts locationId={profile.location_id} />
-        )}
-
-        {view === "alerts" && canSeeAlerts && (
           <div
             style={{
-              background: CARD_BG,
-              border: `1px solid ${BORDER}`,
-              borderRadius: 14,
-              padding: 14,
-              fontFamily: "sans-serif",
+              maxWidth: 1400,
+              margin: "0 auto",
+              padding: "10px 14px",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              justifyContent: "space-between",
             }}
           >
-            <h2 style={{ margin: "4px 0 10px 0" }}>Notificaciones</h2>
-            <div style={{ color: MUTED, fontSize: 13, marginBottom: 10 }}>
-              Pedidos que requieren acción del rol <b>{profile?.role}</b>.
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <strong style={{ letterSpacing: 0.2 }}>Kanban MVP</strong>
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <TabBtn active={tab === "kanban"} onClick={() => setTab("kanban")}>
+                  Kanban
+                </TabBtn>
+
+                {canSeeHistory && (
+                  <TabBtn active={tab === "history"} onClick={() => setTab("history")}>
+                    Historial
+                  </TabBtn>
+                )}
+
+                {canSeeCosts && (
+                  <TabBtn active={tab === "costs"} onClick={() => setTab("costs")}>
+                    Costos
+                  </TabBtn>
+                )}
+              </div>
+
+              <span
+                style={{
+                  fontSize: 12,
+                  padding: "4px 8px",
+                  borderRadius: 999,
+                  background: "#f1f5f9",
+                  border: "1px solid #e2e8f0",
+                  color: "#334155",
+                }}
+              >
+                Rol: <b>{role || (loadingProfile ? "cargando..." : "sin rol")}</b>
+              </span>
+
+              {err && (
+                <span style={{ fontSize: 12, color: "#b91c1c" }}>
+                  {err}
+                </span>
+              )}
             </div>
 
-            {alertsCount === 0 ? (
-              <div style={{ padding: 12, borderRadius: 12, border: `1px dashed ${BORDER}`, color: MUTED }}>
-                No hay pendientes. Por ahora el negocio está sospechosamente ordenado.
-              </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {alerts.map((a) => (
-                  <div
-                    key={a.id}
-                    style={{
-                      border: `1px solid ${BORDER}`,
-                      borderRadius: 12,
-                      padding: 12,
-                      background: "#fff",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 10,
-                      flexWrap: "wrap",
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 800 }}>#{a.order_number} — {a.customer_name}</div>
-                      <div style={{ fontSize: 13, color: MUTED }}>
-                        Estado: <b>{a.status}</b> • Canal: {a.channel}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 12, color: MUTED }}>
-                      {new Date(a.updated_at).toLocaleString("es-AR", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" })}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div style={{ marginTop: 12, color: MUTED, fontSize: 12 }}>
-              Tip: cuando cambie el estado en Kanban, esta lista se actualiza sola (cada 5s).
-            </div>
+            <button
+              onClick={() => supabase.auth.signOut()}
+              style={{
+                border: "1px solid #e5e7eb",
+                background: "#0f172a",
+                color: "white",
+                padding: "8px 12px",
+                borderRadius: 10,
+                fontWeight: 600,
+              }}
+            >
+              Salir
+            </button>
           </div>
-        )}
+        </div>
+
+        {/* Contenido */}
+        <div style={{ maxWidth: 1400, margin: "0 auto", padding: "14px" }}>
+          {!profile ? (
+            <div
+              style={{
+                background: "white",
+                border: "1px solid #e5e7eb",
+                borderRadius: 14,
+                padding: 16,
+              }}
+            >
+              Cargando perfil…
+            </div>
+          ) : (
+            <>
+              {tab === "kanban" && <Kanban role={role} locationId={locationId} />}
+              {tab === "history" && canSeeHistory && <History role={role} locationId={locationId} />}
+              {tab === "costs" && canSeeCosts && <Costs role={role} locationId={locationId} />}
+            </>
+          )}
+        </div>
       </div>
-    </div>
+    </>
+  );
+}
+
+function TabBtn({ active, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: active ? "1px solid #0f172a" : "1px solid #e5e7eb",
+        background: active ? "#0f172a" : "#ffffff",
+        color: active ? "white" : "#0f172a",
+        padding: "8px 12px",
+        borderRadius: 10,
+        fontWeight: 700,
+        fontSize: 13,
+      }}
+    >
+      {children}
+    </button>
   );
 }
