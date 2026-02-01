@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabase";
-
 import Login from "./pages/Login";
 import Kanban from "./pages/Kanban";
 import History from "./pages/History";
@@ -9,25 +8,26 @@ import Costs from "./pages/Costs";
 export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null); // { role, location_id }
-  const [view, setView] = useState("kanban");
-  const [bootError, setBootError] = useState("");
+  const [loadingProfile, setLoadingProfile] = useState(true);
 
-  // 1) Sesión
+  // Tab persistente (no te patea al Kanban)
+  const [tab, setTab] = useState(() => sessionStorage.getItem("tab") || "kanban");
+  useEffect(() => sessionStorage.setItem("tab", tab), [tab]);
+
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => {
-      setSession(sess);
-      setProfile(null);
-      setBootError("");
-      setView("kanban");
-    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // 2) Perfil (role/location) desde location_users
   useEffect(() => {
     const run = async () => {
-      if (!session?.user?.id) return;
+      if (!session?.user) {
+        setProfile(null);
+        setLoadingProfile(false);
+        return;
+      }
+      setLoadingProfile(true);
 
       const { data, error } = await supabase
         .from("location_users")
@@ -36,98 +36,114 @@ export default function App() {
         .single();
 
       if (error) {
-        setBootError(`Error leyendo location_users: ${error.message}`);
+        console.error("Error leyendo location_users:", error);
         setProfile(null);
-        return;
+      } else {
+        setProfile(data);
       }
-      setProfile(data);
+      setLoadingProfile(false);
     };
+
     run();
   }, [session?.user?.id]);
 
-  if (!session) return <Login />;
-  if (bootError) return <div style={{ padding: 20, color: "crimson" }}>{bootError}</div>;
-  if (!profile) return <div style={{ padding: 20 }}>Cargando perfil…</div>;
+  const role = profile?.role || null;
+  const locationId = profile?.location_id || null;
 
-  const role = profile.role;
-  const locationId = profile.location_id;
+  const allowedTabs = useMemo(() => {
+    if (!role) return ["kanban"];
+    if (role === "admin") return ["kanban", "history", "costs"];
+    if (role === "operario") return ["kanban", "history"];
+    // cocinero
+    return ["kanban"];
+  }, [role]);
 
-  const canSeeHistory = role === "admin"; // operario NO (según tu último pedido)
-  const canSeeCosts = role === "admin";
-  const canDoActions = role === "admin" || role === "operario"; // cocinero read-only
-
-  // Si el usuario está en una vista no permitida, lo devolvemos a kanban
   useEffect(() => {
-    if (view === "history" && !canSeeHistory) setView("kanban");
-    if (view === "costs" && !canSeeCosts) setView("kanban");
-  }, [view, canSeeHistory, canSeeCosts]);
+    // Si quedaste en una tab no permitida (ej: cocinero), te llevo a kanban sin drama
+    if (!allowedTabs.includes(tab)) setTab("kanban");
+  }, [allowedTabs, tab]);
+
+  if (!session) return <Login />;
+  if (loadingProfile) return <div style={{ padding: 24 }}>Cargando perfil…</div>;
+  if (!profile) return <div style={{ padding: 24, color: "crimson" }}>No se pudo cargar tu rol/location.</div>;
+
+  const NavBtn = ({ id, label }) => {
+    const active = tab === id;
+    return (
+      <button
+        onClick={() => setTab(id)}
+        style={{
+          padding: "8px 12px",
+          borderRadius: 10,
+          border: "1px solid #d0d7de",
+          background: active ? "#111827" : "#ffffff",
+          color: active ? "#fff" : "#111827",
+          fontWeight: 600,
+          cursor: "pointer",
+        }}
+      >
+        {label}
+      </button>
+    );
+  };
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f6f7fb" }}>
-      {/* Top bar */}
+    <div style={{ minHeight: "100vh", background: "#f5f7fb" }}>
       <div
         style={{
-          display: "flex",
-          gap: 10,
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "10px 14px",
-          borderBottom: "1px solid #e5e7eb",
-          background: "#ffffff",
           position: "sticky",
           top: 0,
           zIndex: 10,
+          background: "rgba(245,247,251,0.95)",
+          backdropFilter: "blur(6px)",
+          borderBottom: "1px solid #e5e7eb",
         }}
       >
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <strong style={{ fontFamily: "system-ui" }}>Kanban MVP</strong>
-          <span
-            style={{
-              fontSize: 12,
-              background: "#eef2ff",
-              border: "1px solid #c7d2fe",
-              padding: "2px 8px",
-              borderRadius: 999,
-            }}
-          >
-            Rol: {role}
-          </span>
-        </div>
+        <div
+          style={{
+            maxWidth: 1400,
+            margin: "0 auto",
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 800 }}>Kanban MVP</div>
 
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button
-            onClick={() => setView("kanban")}
-            style={tabStyle(view === "kanban")}
-          >
-            Kanban
-          </button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {allowedTabs.includes("kanban") && <NavBtn id="kanban" label="Kanban" />}
+              {allowedTabs.includes("history") && <NavBtn id="history" label="Historial" />}
+              {allowedTabs.includes("costs") && <NavBtn id="costs" label="Costos" />}
+            </div>
 
-          {canSeeHistory && (
-            <button
-              onClick={() => setView("history")}
-              style={tabStyle(view === "history")}
+            <span
+              style={{
+                marginLeft: 6,
+                fontSize: 12,
+                padding: "4px 8px",
+                borderRadius: 999,
+                background: "#eef2ff",
+                border: "1px solid #c7d2fe",
+                color: "#3730a3",
+                fontWeight: 700,
+              }}
             >
-              Historial
-            </button>
-          )}
-
-          {canSeeCosts && (
-            <button
-              onClick={() => setView("costs")}
-              style={tabStyle(view === "costs")}
-            >
-              Costos
-            </button>
-          )}
+              Rol: {role}
+            </span>
+          </div>
 
           <button
             onClick={() => supabase.auth.signOut()}
             style={{
               padding: "8px 12px",
               borderRadius: 10,
-              border: "1px solid #e5e7eb",
+              border: "1px solid #d0d7de",
               background: "#111827",
-              color: "white",
+              color: "#fff",
+              fontWeight: 700,
               cursor: "pointer",
             }}
           >
@@ -136,26 +152,17 @@ export default function App() {
         </div>
       </div>
 
-      {/* Content */}
-      <div style={{ padding: 14 }}>
-        {view === "kanban" && (
-          <Kanban role={role} locationId={locationId} canDoActions={canDoActions} />
+      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "16px" }}>
+        {tab === "kanban" && (
+          <Kanban role={role} locationId={locationId} active={tab === "kanban"} />
         )}
-        {view === "history" && <History role={role} locationId={locationId} />}
-        {view === "costs" && <Costs locationId={locationId} />}
+        {tab === "history" && (
+          <History role={role} locationId={locationId} active={tab === "history"} />
+        )}
+        {tab === "costs" && (
+          <Costs role={role} locationId={locationId} active={tab === "costs"} />
+        )}
       </div>
     </div>
   );
-}
-
-function tabStyle(active) {
-  return {
-    padding: "8px 12px",
-    borderRadius: 10,
-    border: active ? "1px solid #111827" : "1px solid #e5e7eb",
-    background: active ? "#111827" : "#ffffff",
-    color: active ? "#ffffff" : "#111827",
-    cursor: "pointer",
-    fontWeight: 600,
-  };
 }
