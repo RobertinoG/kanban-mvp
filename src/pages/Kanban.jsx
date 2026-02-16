@@ -252,7 +252,7 @@ export default function Kanban({ role, locationId }) {
                               {o.channel || ""}
                             </div>
 
-                            {o.notes ? (
+                            {(o.notes || o.note) ? (
                               <div
                                 style={{
                                   marginTop: 8,
@@ -264,7 +264,7 @@ export default function Kanban({ role, locationId }) {
                                   lineHeight: 1.2,
                                 }}
                               >
-                                <b>Nota cliente:</b> {o.notes}
+                                <b>Nota cliente:</b> {o.notes || o.note}
                               </div>
                             ) : null}
 
@@ -279,24 +279,20 @@ export default function Kanban({ role, locationId }) {
                             {!canAct || transitions.length === 0 ? (
                               <div style={{ fontSize: 12, opacity: 0.55 }}>Sin acciones</div>
                             ) : (
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                                {transitions.map((t) => (
-                                  <button
-                                    key={t}
-                                    onClick={() => move(o.id, t)}
-                                    style={{
-                                      padding: "8px 10px",
-                                      borderRadius: 12,
-                                      border: "1px solid #111827",
-                                      background: "#111827",
-                                      color: "#fff",
-                                      fontSize: 12,
-                                      cursor: "pointer",
-                                    }}
-                                  >
-                                    → {statusLabel(t)}
-                                  </button>
-                                ))}
+                              <div className="orderActions">
+                                {transitions.map((t) => {
+                                  const isCancel = String(t).toLowerCase().includes("cancel");
+                                  return (
+                                    <button
+                                      key={t}
+                                      type="button"
+                                      onClick={() => move(o.id, t)}
+                                      className={`btn smallBtn ${isCancel ? "btnDanger" : "btnPrimary"}`}
+                                    >
+                                      → {statusLabel(t)}
+                                    </button>
+                                  );
+                                })}
                               </div>
                             )}
                           </div>
